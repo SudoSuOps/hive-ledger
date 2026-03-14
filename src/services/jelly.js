@@ -22,10 +22,13 @@ export const SOURCE_WEIGHTS = {
   fred: 0.90,
   human: 0.90,
   openalex: 0.85,
+  arxiv: 0.80,
   zenodo: 0.85,
+  github: 0.72,
   cre_news: 0.65,
   rss: 0.60,
   webhook: 0.60,
   hn: 0.50,
   reddit: 0.50,
+  trending: 0.40,
 };

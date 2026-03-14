@@ -24,6 +24,15 @@ import urllib.error
 
 LEDGER_URL = os.environ.get("HIVE_LEDGER_URL", "https://ledger.swarmandbee.ai")
 ADMIN_KEY = os.environ.get("HIVE_ADMIN_KEY", "")
+UA = "SwarmCookAuditor/1.0"
+
+# Canonical 3-letter domain codes (matches virgin-jelly/protocol.py)
+DOMAIN_CODES: dict[str, str] = {
+    "ai": "AIS", "medical": "MED", "aviation": "AVI", "cre": "CRE",
+    "economic": "ECO", "legal": "LGL", "energy": "NRG", "climate": "CLM",
+    "crypto": "CRY", "finance": "FIN", "software": "SFT",
+    "supply_chain": "SCH", "patents": "PAT", "general": "GEN",
+}
 
 
 def sha256(text: str) -> str:
@@ -57,6 +66,7 @@ def post_batch(batch_data: dict) -> dict:
         headers={
             "Content-Type": "application/json",
             "X-Admin-Key": ADMIN_KEY,
+            "User-Agent": UA,
         },
         method="POST",
     )
@@ -95,7 +105,8 @@ def load_pairs_from_jsonl(path: str, domain: str) -> list[dict]:
                 continue
 
             fp = sha256((user_msg + asst_msg).strip().lower())
-            pair_id = f"HIVE-{domain.upper()[:3]}-{fp[:12]}"
+            domain_code = DOMAIN_CODES.get(domain, domain.upper()[:3])
+            pair_id = f"HIVE-{domain_code}-{fp[:12]}"
 
             meta = record.get("metadata", {})
 
