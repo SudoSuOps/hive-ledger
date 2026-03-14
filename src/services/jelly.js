@@ -25,6 +25,7 @@ export const SOURCE_WEIGHTS = {
   arxiv: 0.80,
   zenodo: 0.85,
   github: 0.72,
+  swarmjelly: 0.70,
   cre_news: 0.65,
   rss: 0.60,
   webhook: 0.60,
