@@ -25,6 +25,20 @@ import urllib.error
 LEDGER_URL = os.environ.get("HIVE_LEDGER_URL", "https://ledger.swarmandbee.ai")
 ADMIN_KEY = os.environ.get("HIVE_ADMIN_KEY", "")
 
+UA = "SwarmLedgerSync/1.0"
+
+# Map legacy tier names to RJP-1 tiers
+TIER_MAP = {
+    "genesis": "royal_jelly",
+    "cluster": "honey",
+    "honey": "honey",
+    "cell": "pollen",
+    "pollen": "pollen",
+    "royal_jelly": "royal_jelly",
+    "propolis": "propolis",
+    "jelly": "royal_jelly",
+}
+
 
 def post_sync(data: dict) -> dict:
     url = f"{LEDGER_URL}/api/admin/sync"
@@ -36,6 +50,7 @@ def post_sync(data: dict) -> dict:
         headers={
             "Content-Type": "application/json",
             "X-Admin-Key": ADMIN_KEY,
+            "User-Agent": UA,
         },
         method="POST",
     )
@@ -44,9 +59,30 @@ def post_sync(data: dict) -> dict:
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
+        body = e.read().decode()[:300]
         print(f"  ERROR: HTTP {e.code}: {body}", file=sys.stderr)
         return {"error": body}
+
+
+def normalize_tier(tier: str) -> str:
+    """Map legacy tier names to RJP-1 canonical tiers."""
+    return TIER_MAP.get(tier.lower().strip(), "propolis") if tier else "propolis"
+
+
+def normalize_tier_distribution(dist_str: str) -> dict:
+    """Normalize tier distribution JSON from legacy names to RJP-1."""
+    if not dist_str:
+        return {}
+    try:
+        dist = json.loads(dist_str)
+    except json.JSONDecodeError:
+        return {}
+
+    normalized = {}
+    for tier, count in dist.items():
+        rjp_tier = normalize_tier(tier)
+        normalized[rjp_tier] = normalized.get(rjp_tier, 0) + count
+    return normalized
 
 
 def sync_batches(conn, dry_run=False):
@@ -55,24 +91,33 @@ def sync_batches(conn, dry_run=False):
     total = cursor.fetchone()[0]
     print(f"Batches to sync: {total}")
 
-    cursor = conn.execute("""
-        SELECT batch_id, domain, pair_count, merkle_root,
-               gate_pass_rate, avg_score, tier_distribution,
-               created_at
-        FROM batches
-    """)
+    # Check columns
+    cursor = conn.execute("PRAGMA table_info(batches)")
+    columns = {row[1] for row in cursor}
+
+    # Build flexible SELECT
+    select_cols = ["batch_id", "domain", "pair_count", "merkle_root"]
+    for col in ["gate_pass_rate", "avg_score", "tier_distribution", "created_at", "status"]:
+        if col in columns:
+            select_cols.append(col)
+
+    cursor = conn.execute(f"SELECT {', '.join(select_cols)} FROM batches")
 
     batches = []
     for row in cursor:
+        data = {select_cols[i]: row[i] for i in range(len(select_cols))}
+
+        tier_dist = normalize_tier_distribution(data.get("tier_distribution", ""))
+
         batches.append({
-            "batch_id": row[0],
-            "domain": row[1],
-            "pair_count": row[2],
-            "merkle_root": row[3],
-            "gate_pass_rate": row[4] or 0,
-            "avg_score": row[5] or 0,
-            "tier_distribution": json.loads(row[6]) if row[6] else {},
-            "audit_timestamp": row[7] or "",
+            "batch_id": data["batch_id"],
+            "domain": data["domain"],
+            "pair_count": data["pair_count"],
+            "merkle_root": data["merkle_root"],
+            "gate_pass_rate": data.get("gate_pass_rate", 0) or 0,
+            "avg_score": data.get("avg_score", 0) or 0,
+            "tier_distribution": tier_dist,
+            "audit_timestamp": data.get("created_at", ""),
         })
 
     if dry_run:
@@ -90,23 +135,21 @@ def sync_pairs(conn, chunk_size=5000, dry_run=False):
     """Sync pairs table in chunks."""
     cursor = conn.execute("SELECT COUNT(*) FROM pairs")
     total = cursor.fetchone()[0]
-    print(f"Pairs to sync: {total}")
+    print(f"Pairs to sync: {total:,}")
 
     # Check which columns exist
     cursor = conn.execute("PRAGMA table_info(pairs)")
     columns = {row[1] for row in cursor}
 
     # Build SELECT based on available columns
-    select_cols = ["pair_id", "fingerprint", "domain", "task_type", "score", "tier"]
-    optional_cols = [
-        "signal_id", "source_confidence", "gate_integrity", "reasoning_depth",
-        "entropy_health", "fingerprint_uniqueness", "gate_json_valid",
-        "gate_output_length", "gate_numeric_verify", "gate_concept_present",
-        "gate_dedup", "gate_degenerate", "gates_passed",
-        "gen_model", "cook_script", "source_file", "status"
-    ]
-
-    for col in optional_cols:
+    select_cols = ["pair_id", "fingerprint", "domain"]
+    # Add optional columns that might exist
+    for col in ["task_type", "score", "tier", "signal_id",
+                "source_confidence", "gate_integrity", "reasoning_depth",
+                "entropy_health", "fingerprint_uniqueness",
+                "gate_json_valid", "gate_output_length", "gate_numeric_verify",
+                "gate_concept_present", "gate_dedup", "gate_degenerate",
+                "gates_passed", "gen_model", "cook_script", "source_file", "status"]:
         if col in columns:
             select_cols.append(col)
 
@@ -116,6 +159,7 @@ def sync_pairs(conn, chunk_size=5000, dry_run=False):
     synced_total = 0
     chunk = []
     chunk_num = 0
+    errors = 0
 
     for row in cursor:
         pair = {}
@@ -125,21 +169,28 @@ def sync_pairs(conn, chunk_size=5000, dry_run=False):
         # Ensure required fields
         pair.setdefault("task_type", "")
         pair.setdefault("score", 0)
-        pair.setdefault("tier", "propolis")
         pair.setdefault("status", "active")
+
+        # Normalize tier name
+        raw_tier = pair.get("tier", "propolis") or "propolis"
+        pair["tier"] = normalize_tier(raw_tier)
 
         chunk.append(pair)
 
         if len(chunk) >= chunk_size:
             chunk_num += 1
             if dry_run:
-                print(f"  [DRY RUN] Chunk {chunk_num}: {len(chunk)} pairs")
+                print(f"  [DRY RUN] Chunk {chunk_num}: {len(chunk)} pairs ({chunk_num * chunk_size:,}/{total:,})")
             else:
                 result = post_sync({"pairs": chunk})
-                synced = result.get("synced_pairs", 0)
-                synced_total += synced
-                print(f"  Chunk {chunk_num}: {synced}/{len(chunk)} synced ({synced_total}/{total} total)")
-                time.sleep(0.5)  # Rate limit
+                if "error" in result:
+                    errors += 1
+                    print(f"  Chunk {chunk_num}: ERROR")
+                else:
+                    synced = result.get("synced_pairs", 0)
+                    synced_total += synced
+                    print(f"  Chunk {chunk_num}: {synced}/{len(chunk)} synced ({synced_total:,}/{total:,} total)")
+                time.sleep(0.3)
 
             chunk = []
 
@@ -150,10 +201,14 @@ def sync_pairs(conn, chunk_size=5000, dry_run=False):
             print(f"  [DRY RUN] Chunk {chunk_num}: {len(chunk)} pairs")
         else:
             result = post_sync({"pairs": chunk})
-            synced = result.get("synced_pairs", 0)
-            synced_total += synced
-            print(f"  Chunk {chunk_num}: {synced}/{len(chunk)} synced ({synced_total}/{total} total)")
+            if "error" not in result:
+                synced = result.get("synced_pairs", 0)
+                synced_total += synced
+                print(f"  Chunk {chunk_num}: {synced}/{len(chunk)} synced ({synced_total:,}/{total:,} total)")
 
+    print(f"\n  Total synced: {synced_total:,}")
+    if errors:
+        print(f"  Errors: {errors}")
     return synced_total
 
 
