@@ -1,0 +1,20 @@
+name = "hive-ledger"
+main = "src/index.js"
+compatibility_date = "2026-03-14"
+route = { pattern = "ledger.swarmandbee.ai/*", zone_name = "swarmandbee.ai" }
+
+[vars]
+ENVIRONMENT = "production"
+ADMIN_KEY_HASH = "4bc2643507a2af99b4c13c4118296cf849ff67f365c0f56fb83e4cd9d41833f0"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hive-ledger"
+database_id = "31173152-ee50-4594-8a95-1c2d772846a4"
+
+[[r2_buckets]]
+binding = "MANIFESTS"
+bucket_name = "swarm-ledger-vault"
+
+[dev]
+port = 8788
